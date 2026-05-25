@@ -16,6 +16,7 @@ set(msg_files
   "msg/MotorCommand.msg"
   "msg/LambdaCommand.msg"
   "msg/MotorMeasurement.msg"
+  "msg/EEPoseGripperCmd.msg"
 )
 
 set(srv_files

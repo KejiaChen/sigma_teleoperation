@@ -72,12 +72,15 @@ FrankaNodeInference::FrankaNodeInference(std::string node_name, std::string robo
     pose_backend_max_angular_speed_ =
         this->declare_parameter<double>("pose_backend_max_angular_speed", 0.35);
     // Create subscriber
-    absolute_pose_subscription_ = create_subscription<geometry_msgs::msg::PoseStamped>(
-        "/AbsolutePoseRight", qos_profile, std::bind(&FrankaNodeInference::absolutePoseCommandCallback, this, _1),
-        sub_options_);
-    gripper_command_subscription_ = create_subscription<std_msgs::msg::Float64>(
-        "/GripperCmdRight", qos_profile,
-        std::bind(&FrankaNodeInference::gripperCommandCallback, this, _1), sub_options_);
+    // absolute_pose_subscription_ = create_subscription<geometry_msgs::msg::PoseStamped>(
+    //     "/AbsolutePoseRight", qos_profile, std::bind(&FrankaNodeInference::absolutePoseCommandCallback, this, _1),
+    //     sub_options_);
+    // gripper_command_subscription_ = create_subscription<std_msgs::msg::Float64>(
+    //     "/GripperCmdRight", qos_profile,
+    //     std::bind(&FrankaNodeInference::gripperCommandCallback, this, _1), sub_options_);
+    egoasis_action_subscription_ = create_subscription<custom_msgs::msg::EEPoseGripperCmd>(
+        "/EgoasisAction", qos_profile,
+        std::bind(&FrankaNodeInference::egoasisActionCallback, this, _1), sub_options_);
     
     joint_states_publisher_ =
       this->create_publisher<sensor_msgs::msg::JointState>("/frankaRight/joint_states", 1);
@@ -207,7 +210,7 @@ FrankaNodeInference::FrankaNodeInference(std::string node_name, std::string robo
                 gripper_width_publisher_->publish(gripper_width_msg);
                 is_grasped_publisher_->publish(is_grasped_msg);
 
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
         } catch (const franka::Exception& e) {
             std::cout << e.what() << std::endl;
@@ -922,6 +925,14 @@ void FrankaNodeInference::lambdaCommandCallback(const custom_msgs::msg::LambdaCo
         v_gripper_ = lambda_command_.v_gripper;
         close_gripper_ = lambda_command_.enable_backlash_compensation;
     }
+}
+
+void FrankaNodeInference::egoasisActionCallback(const custom_msgs::msg::EEPoseGripperCmd::SharedPtr msg) {
+    absolutePoseCommandCallback(std::make_shared<geometry_msgs::msg::PoseStamped>(msg->ee_pose));
+
+    std::lock_guard<std::mutex> grip_lock(mutex_grip_);
+    v_gripper_ = msg->gripper_cmd ? 1.0 : 0.0;
+    close_gripper_ = msg->gripper_cmd;
 }
 
 void FrankaNodeInference::gripperCommandCallback(const std_msgs::msg::Float64::SharedPtr msg) {

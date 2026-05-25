@@ -27,6 +27,7 @@
 #include "geometry_msgs/msg/wrench.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include <sensor_msgs/msg/joint_state.hpp>
+#include "custom_msgs/msg/ee_pose_gripper_cmd.hpp"
 #include "custom_msgs/msg/lambda_command.hpp"
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/float64.hpp>
@@ -87,7 +88,7 @@ class FrankaNodeInference : public rclcpp::Node {
     // ROS communication
     // rclcpp::TimerBase::SharedPtr timer_;
     rclcpp::Subscription<custom_msgs::msg::LambdaCommand>::SharedPtr subscription_;
-    rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr gripper_command_subscription_;
+    rclcpp::Subscription<custom_msgs::msg::EEPoseGripperCmd>::SharedPtr egoasis_action_subscription_;
     // rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr delta_pose_subscription_;
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr absolute_pose_subscription_;
     rclcpp::Publisher<geometry_msgs::msg::Wrench>::SharedPtr publisher_;
@@ -132,6 +133,7 @@ class FrankaNodeInference : public rclcpp::Node {
     // void receive_callback(const geometry_msgs::msg::Twist::SharedPtr msg);
     custom_msgs::msg::LambdaCommand lambda_command_;
     void lambdaCommandCallback(const custom_msgs::msg::LambdaCommand::SharedPtr msg);
+    void egoasisActionCallback(const custom_msgs::msg::EEPoseGripperCmd::SharedPtr msg);
     void gripperCommandCallback(const std_msgs::msg::Float64::SharedPtr msg);
     void absolutePoseCommandCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
     void initializePoseTarget(const franka::RobotState& robot_states);
