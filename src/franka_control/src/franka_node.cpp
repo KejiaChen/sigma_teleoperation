@@ -154,9 +154,37 @@ FrankaNode::FrankaNode(std::string node_name, std::string robot_IP) : Node(node_
 
             const double grasping_width = 0.0;
             const double grasping_force = 100.0;  // TODO: SET REASONABLE VALUE
+            const double closing_speed = 0.5;
+            const double opening_speed = 0.1;
+            const double grasp_epsilon_inner = 0.1;
+            const double grasp_epsilon_outer = 0.1;
             double gripper_max_width = 0.0;
             bool close_gripper_flag = false;
+            bool last_close_gripper_flag = false;
             bool grasped_flag = false;
+
+            auto refresh_gripper_cache = [&]() {
+                const franka::GripperState gripper_state = gripper_.readOnce();
+                cached_gripper_width_.store(gripper_state.width);
+                cached_is_grasped_.store(gripper_state.is_grasped);
+                return gripper_state;
+            };
+
+            auto apply_gripper_command = [&](bool should_close) {
+                std::lock_guard<std::mutex> gripper_api_lock(mutex_gripper_api_);
+
+                if (should_close) {
+                    grasped_flag = gripper_.grasp(grasping_width, closing_speed, grasping_force,
+                                                  grasp_epsilon_inner, grasp_epsilon_outer);
+                    std::cout << "Gripper success: " << grasped_flag << std::endl;
+                } else {
+                    gripper_.stop();
+                    gripper_.move(gripper_max_width, opening_speed);
+                    grasped_flag = false;
+                }
+
+                refresh_gripper_cache();
+            };
 
             {
                 std::lock_guard<std::mutex> grip_lock(mutex_grip_);
@@ -168,18 +196,16 @@ FrankaNode::FrankaNode(std::string node_name, std::string robot_IP) : Node(node_
                 gripper_.stop();
                 gripper_.homing();
 
-                const franka::GripperState gripper_state = gripper_.readOnce();
+                const franka::GripperState gripper_state = refresh_gripper_cache();
                 gripper_max_width = gripper_state.max_width;
-                cached_gripper_width_.store(gripper_state.width);
-                cached_is_grasped_.store(gripper_state.is_grasped);
-
-                if (close_gripper_flag) {
-                    grasped_flag = gripper_.grasp(grasping_width, 0.5, grasping_force, 0.1, 0.1);
-                    std::cout << "Gripper success: " << grasped_flag << std::endl;
-                } else {
-                    gripper_.move(gripper_max_width, 0.1);
-                }
             }
+
+            {
+                std::lock_guard<std::mutex> grip_lock(mutex_grip_);
+                close_gripper_flag = close_gripper_;
+            }
+            last_close_gripper_flag = close_gripper_flag;
+            apply_gripper_command(close_gripper_flag);
 
             while (gripper_threads_running_.load()) {
                 {
@@ -187,15 +213,9 @@ FrankaNode::FrankaNode(std::string node_name, std::string robot_IP) : Node(node_
                     close_gripper_flag = close_gripper_;
                 }
 
-                if (close_gripper_flag && !grasped_flag) {
-                    std::lock_guard<std::mutex> gripper_api_lock(mutex_gripper_api_);
-                    grasped_flag = gripper_.grasp(grasping_width, 0.5, grasping_force, 0.1, 0.1);
-                    std::cout << "Gripper success: " << grasped_flag << std::endl;
-                } else if (!close_gripper_flag && grasped_flag) {
-                    std::lock_guard<std::mutex> gripper_api_lock(mutex_gripper_api_);
-                    gripper_.stop();
-                    gripper_.move(gripper_max_width, 0.1);
-                    grasped_flag = false;
+                if (close_gripper_flag != last_close_gripper_flag) {
+                    apply_gripper_command(close_gripper_flag);
+                    last_close_gripper_flag = close_gripper_flag;
                 }
 
                 std::this_thread::sleep_for(std::chrono::milliseconds(20));
@@ -205,31 +225,31 @@ FrankaNode::FrankaNode(std::string node_name, std::string robot_IP) : Node(node_
         }
     });
 
-    gripper_state_thread_ = std::thread([this]() {
-        try {
-            std_msgs::msg::Float64 gripper_width_msg;
-            std_msgs::msg::Bool is_grasped_msg;
+    // gripper_state_thread_ = std::thread([this]() {
+    //     try {
+    //         std_msgs::msg::Float64 gripper_width_msg;
+    //         std_msgs::msg::Bool is_grasped_msg;
 
-            while (gripper_threads_running_.load()) {
-                franka::GripperState gripper_state;
-                {
-                    std::lock_guard<std::mutex> gripper_api_lock(mutex_gripper_api_);
-                    gripper_state = gripper_.readOnce();
-                }
+    //         while (gripper_threads_running_.load()) {
+    //             franka::GripperState gripper_state;
+    //             {
+    //                 std::lock_guard<std::mutex> gripper_api_lock(mutex_gripper_api_);
+    //                 gripper_state = gripper_.readOnce();
+    //             }
 
-                cached_gripper_width_.store(gripper_state.width);
-                cached_is_grasped_.store(gripper_state.is_grasped);
-                gripper_width_msg.data = gripper_state.width;
-                is_grasped_msg.data = gripper_state.is_grasped;
-                gripper_width_publisher_->publish(gripper_width_msg);
-                is_grasped_publisher_->publish(is_grasped_msg);
+    //             cached_gripper_width_.store(gripper_state.width);
+    //             cached_is_grasped_.store(gripper_state.is_grasped);
+    //             gripper_width_msg.data = gripper_state.width;
+    //             is_grasped_msg.data = gripper_state.is_grasped;
+    //             gripper_width_publisher_->publish(gripper_width_msg);
+    //             is_grasped_publisher_->publish(is_grasped_msg);
 
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            }
-        } catch (const franka::Exception& e) {
-            std::cout << e.what() << std::endl;
-        }
-    });
+    //             std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    //         }
+    //     } catch (const franka::Exception& e) {
+    //         std::cout << e.what() << std::endl;
+    //     }
+    // });
 
     control_thread_ = std::thread([this]() { 
         try {
