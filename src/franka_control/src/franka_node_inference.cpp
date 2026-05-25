@@ -75,6 +75,9 @@ FrankaNodeInference::FrankaNodeInference(std::string node_name, std::string robo
     absolute_pose_subscription_ = create_subscription<geometry_msgs::msg::PoseStamped>(
         "/AbsolutePoseRight", qos_profile, std::bind(&FrankaNodeInference::absolutePoseCommandCallback, this, _1),
         sub_options_);
+    gripper_command_subscription_ = create_subscription<std_msgs::msg::Float64>(
+        "/GripperCmdRight", qos_profile,
+        std::bind(&FrankaNodeInference::gripperCommandCallback, this, _1), sub_options_);
     
     joint_states_publisher_ =
       this->create_publisher<sensor_msgs::msg::JointState>("/frankaRight/joint_states", 1);
@@ -82,8 +85,7 @@ FrankaNodeInference::FrankaNodeInference(std::string node_name, std::string robo
     ee_pose_publisher_ =
       this->create_publisher<std_msgs::msg::Float64MultiArray>("/frankaRight/ee_pose", 1);
     
-      
-    publisher_ = this->create_publisher<geometry_msgs::msg::Wrench>("/WrenchRight", 1); // TTODO: read left/right from launch file
+    publisher_ = this->create_publisher<geometry_msgs::msg::Wrench>("/WrenchRight", 1); // TODO: read left/right from launch file
     
     frame_flange2base_publisher_ = this->create_publisher<std_msgs::msg::Float64MultiArray>("/O_T_FTSensorRight", 1);
 
@@ -132,31 +134,35 @@ FrankaNodeInference::FrankaNodeInference(std::string node_name, std::string robo
     gripper_thread_ = std::thread([this]() {
         try {
             std::cout << "Initializing gripper..." << std::endl;
-            {
-                std::lock_guard<std::mutex> gripper_api_lock(mutex_gripper_api_);
-                gripper_.stop();
-                gripper_.homing();
-            }
 
-            franka::GripperState initial_gripper_state;
-            {
-                std::lock_guard<std::mutex> gripper_api_lock(mutex_gripper_api_);
-                initial_gripper_state = gripper_.readOnce();
-            }
-
-            cached_gripper_width_.store(initial_gripper_state.width);
-            cached_is_grasped_.store(initial_gripper_state.is_grasped);
-
-            const double gripper_max_width = initial_gripper_state.max_width;
             const double grasping_width = 0.0;
             const double grasping_force = 100.0;  // TODO: SET REASONABLE VALUE
-
+            double gripper_max_width = 0.0;
             bool close_gripper_flag = false;
+            bool grasped_flag = false;
+
             {
                 std::lock_guard<std::mutex> grip_lock(mutex_grip_);
                 close_gripper_flag = close_gripper_;
             }
-            bool last_close_gripper_flag = !close_gripper_flag;
+
+            {
+                std::lock_guard<std::mutex> gripper_api_lock(mutex_gripper_api_);
+                gripper_.stop();
+                gripper_.homing();
+
+                const franka::GripperState gripper_state = gripper_.readOnce();
+                gripper_max_width = gripper_state.max_width;
+                cached_gripper_width_.store(gripper_state.width);
+                cached_is_grasped_.store(gripper_state.is_grasped);
+
+                if (close_gripper_flag) {
+                    grasped_flag = gripper_.grasp(grasping_width, 0.5, grasping_force, 0.1, 0.1);
+                    std::cout << "Gripper success: " << grasped_flag << std::endl;
+                } else {
+                    gripper_.move(gripper_max_width, 0.1);
+                }
+            }
 
             while (gripper_threads_running_.load()) {
                 {
@@ -164,17 +170,15 @@ FrankaNodeInference::FrankaNodeInference(std::string node_name, std::string robo
                     close_gripper_flag = close_gripper_;
                 }
 
-                if (close_gripper_flag != last_close_gripper_flag) {
+                if (close_gripper_flag && !grasped_flag) {
                     std::lock_guard<std::mutex> gripper_api_lock(mutex_gripper_api_);
-                    if (close_gripper_flag) {
-                        const bool grasped =
-                            gripper_.grasp(grasping_width, 0.5, grasping_force, 0.1, 0.1);
-                        std::cout << "Gripper success: " << grasped << std::endl;
-                    } else {
-                        gripper_.stop();
-                        gripper_.move(gripper_max_width, 0.1);
-                    }
-                    last_close_gripper_flag = close_gripper_flag;
+                    grasped_flag = gripper_.grasp(grasping_width, 0.5, grasping_force, 0.1, 0.1);
+                    std::cout << "Gripper success: " << grasped_flag << std::endl;
+                } else if (!close_gripper_flag && grasped_flag) {
+                    std::lock_guard<std::mutex> gripper_api_lock(mutex_gripper_api_);
+                    gripper_.stop();
+                    gripper_.move(gripper_max_width, 0.1);
+                    grasped_flag = false;
                 }
 
                 std::this_thread::sleep_for(std::chrono::milliseconds(20));
@@ -188,23 +192,22 @@ FrankaNodeInference::FrankaNodeInference(std::string node_name, std::string robo
         try {
             std_msgs::msg::Float64 gripper_width_msg;
             std_msgs::msg::Bool is_grasped_msg;
-            auto next_publish_time = std::chrono::steady_clock::now();
 
             while (gripper_threads_running_.load()) {
-                std::unique_lock<std::mutex> gripper_api_lock(mutex_gripper_api_, std::try_to_lock);
-                if (gripper_api_lock.owns_lock()) {
-                    const franka::GripperState gripper_state = gripper_.readOnce();
-                    cached_gripper_width_.store(gripper_state.width);
-                    cached_is_grasped_.store(gripper_state.is_grasped);
+                franka::GripperState gripper_state;
+                {
+                    std::lock_guard<std::mutex> gripper_api_lock(mutex_gripper_api_);
+                    gripper_state = gripper_.readOnce();
                 }
 
-                gripper_width_msg.data = cached_gripper_width_.load();
-                is_grasped_msg.data = cached_is_grasped_.load();
+                cached_gripper_width_.store(gripper_state.width);
+                cached_is_grasped_.store(gripper_state.is_grasped);
+                gripper_width_msg.data = gripper_state.width;
+                is_grasped_msg.data = gripper_state.is_grasped;
                 gripper_width_publisher_->publish(gripper_width_msg);
                 is_grasped_publisher_->publish(is_grasped_msg);
 
-                next_publish_time += std::chrono::milliseconds(50);
-                std::this_thread::sleep_until(next_publish_time);
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
             }
         } catch (const franka::Exception& e) {
             std::cout << e.what() << std::endl;
@@ -900,24 +903,29 @@ Eigen::MatrixXd FrankaNodeInference::dampedLeastSquaresIK(Eigen::MatrixXd a, dou
     return InverseJacobian;
 }
 
-void FrankaNodeInference::lambdaCommandCallback(const custom_msgs::msg::LambdaCommand::SharedPtr msg) { 
-        lambda_command_ = *msg;
-    if (mutex_vel_.try_lock()) {
-        // print original lambda_command_
-        // std::cout << "lambda_command_: " << lambda_command_.linear.x << " " << lambda_command_.linear.y << " " << lambda_command_.linear.z << " " << lambda_command_.angular.x << " " << lambda_command_.angular.y << " " << lambda_command_.angular.z << std::endl;
+void FrankaNodeInference::lambdaCommandCallback(const custom_msgs::msg::LambdaCommand::SharedPtr msg) {
+    lambda_command_ = *msg;
+
+    {
+        std::lock_guard<std::mutex> vel_lock(mutex_vel_);
         v_x_ = clampValue(-lambda_command_.linear.y, -2.0, 2.0);
         v_y_ = clampValue(lambda_command_.linear.x, -2.0, 2.0);
         v_z_ = clampValue(lambda_command_.linear.z, -2.0, 2.0);
         w_x_ = clampValue(lambda_command_.angular.x, -2.0, 2.0);
         w_y_ = clampValue(lambda_command_.angular.y, -2.0, 2.0);
         w_z_ = clampValue(lambda_command_.angular.z, -2.0, 2.0);
-        if (mutex_grip_.try_lock()) {
-            v_gripper_ = lambda_command_.v_gripper;
-            close_gripper_ = lambda_command_.enable_backlash_compensation;
-            mutex_grip_.unlock();
-        }
         lambda_last_update_time_ = this->now().seconds();
+    }
 
-        mutex_vel_.unlock();
+    {
+        std::lock_guard<std::mutex> grip_lock(mutex_grip_);
+        v_gripper_ = lambda_command_.v_gripper;
+        close_gripper_ = lambda_command_.enable_backlash_compensation;
     }
-    }
+}
+
+void FrankaNodeInference::gripperCommandCallback(const std_msgs::msg::Float64::SharedPtr msg) {
+    std::lock_guard<std::mutex> grip_lock(mutex_grip_);
+    v_gripper_ = msg->data;
+    close_gripper_ = msg->data > 0.0;
+}

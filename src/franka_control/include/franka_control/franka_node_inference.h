@@ -87,6 +87,7 @@ class FrankaNodeInference : public rclcpp::Node {
     // ROS communication
     // rclcpp::TimerBase::SharedPtr timer_;
     rclcpp::Subscription<custom_msgs::msg::LambdaCommand>::SharedPtr subscription_;
+    rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr gripper_command_subscription_;
     // rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr delta_pose_subscription_;
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr absolute_pose_subscription_;
     rclcpp::Publisher<geometry_msgs::msg::Wrench>::SharedPtr publisher_;
@@ -131,6 +132,7 @@ class FrankaNodeInference : public rclcpp::Node {
     // void receive_callback(const geometry_msgs::msg::Twist::SharedPtr msg);
     custom_msgs::msg::LambdaCommand lambda_command_;
     void lambdaCommandCallback(const custom_msgs::msg::LambdaCommand::SharedPtr msg);
+    void gripperCommandCallback(const std_msgs::msg::Float64::SharedPtr msg);
     void absolutePoseCommandCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
     void initializePoseTarget(const franka::RobotState& robot_states);
     void integrateVelocityToPoseTarget(const Eigen::Matrix<double, 6, 1>& velocity_command,

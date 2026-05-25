@@ -130,8 +130,12 @@ FrankaNode::FrankaNode(std::string node_name, std::string robot_IP) : Node(node_
     
     // create shutdown handler
     control_shutdown = [&]() {
+        gripper_threads_running_ = false;
         robot_.stop();
-        gripper_.stop();
+        {
+            std::lock_guard<std::mutex> gripper_api_lock(mutex_gripper_api_);
+            gripper_.stop();
+        }
 
         output_wrench_.force.x = 0.0;
         output_wrench_.force.y = 0.0;
@@ -145,62 +149,82 @@ FrankaNode::FrankaNode(std::string node_name, std::string robot_IP) : Node(node_
 
     ///////////////////////////// CONTROL THREAD ////////////////////////////////
     gripper_thread_ = std::thread([this]() {
-
-        try{
+        try {
             std::cout << "Initializing gripper..." << std::endl;
-            gripper_.stop();
-            gripper_.homing();
 
-            franka::GripperState gripper_state = gripper_.readOnce();
-            std_msgs::msg::Float64 gripper_width_msg;
-            std_msgs::msg::Bool is_grasped_msg;
-            gripper_width_msg.data = gripper_state.width;
-            is_grasped_msg.data = gripper_state.is_grasped;
-            gripper_width_publisher_->publish(gripper_width_msg);
-            is_grasped_publisher_->publish(is_grasped_msg);
-            double gripper_max_width = gripper_state.max_width;
-            double grasping_width = 0.0;
-            // double grasping_width = 0.06;
-            double grasping_force = 100.0; // TODO: SET REASONABLE VALUE
-            // double grasping_force = 20.0; // TODO: SET REASONABLE VALUE
-
+            const double grasping_width = 0.0;
+            const double grasping_force = 100.0;  // TODO: SET REASONABLE VALUE
+            double gripper_max_width = 0.0;
             bool close_gripper_flag = false;
             bool grasped_flag = false;
 
+            {
+                std::lock_guard<std::mutex> grip_lock(mutex_grip_);
+                close_gripper_flag = close_gripper_;
+            }
 
+            {
+                std::lock_guard<std::mutex> gripper_api_lock(mutex_gripper_api_);
+                gripper_.stop();
+                gripper_.homing();
 
-            //for bottle
-            gripper_.grasp(grasping_width, 0.5, grasping_force, 0.1, 0.1);
-
-            while (true){
-            while (lambda_running) {
-                // std::cout << "lambda_running: " << lambda_running << std::endl;
-                if (mutex_grip_.try_lock()) {
-                    close_gripper_flag =  close_gripper_;
-                    mutex_grip_.unlock();
-                }
-
-                gripper_state = gripper_.readOnce();
-                gripper_width_msg.data = gripper_state.width;
-                is_grasped_msg.data = gripper_state.is_grasped;
-                gripper_width_publisher_->publish(gripper_width_msg);
-                is_grasped_publisher_->publish(is_grasped_msg);
+                const franka::GripperState gripper_state = gripper_.readOnce();
+                gripper_max_width = gripper_state.max_width;
+                cached_gripper_width_.store(gripper_state.width);
+                cached_is_grasped_.store(gripper_state.is_grasped);
 
                 if (close_gripper_flag) {
-                    // std::cout << "Grasping object...\n" << std::endl;
-                    if (!grasped_flag) {
-                        grasped_flag = gripper_.grasp(grasping_width, 0.5, grasping_force, 0.1, 0.1);
-                        std::cout << "Gripper success: " << grasped_flag << std::endl;
-                    }  
+                    grasped_flag = gripper_.grasp(grasping_width, 0.5, grasping_force, 0.1, 0.1);
+                    std::cout << "Gripper success: " << grasped_flag << std::endl;
                 } else {
-                    // std::cout << "Releasing ...\n" << std::endl;
+                    gripper_.move(gripper_max_width, 0.1);
+                }
+            }
+
+            while (gripper_threads_running_.load()) {
+                {
+                    std::lock_guard<std::mutex> grip_lock(mutex_grip_);
+                    close_gripper_flag = close_gripper_;
+                }
+
+                if (close_gripper_flag && !grasped_flag) {
+                    std::lock_guard<std::mutex> gripper_api_lock(mutex_gripper_api_);
+                    grasped_flag = gripper_.grasp(grasping_width, 0.5, grasping_force, 0.1, 0.1);
+                    std::cout << "Gripper success: " << grasped_flag << std::endl;
+                } else if (!close_gripper_flag && grasped_flag) {
+                    std::lock_guard<std::mutex> gripper_api_lock(mutex_gripper_api_);
                     gripper_.stop();
                     gripper_.move(gripper_max_width, 0.1);
                     grasped_flag = false;
                 }
 
-                // this_thread::sleep_for(std::chrono::milliseconds(50));
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
             }
+        } catch (const franka::Exception& e) {
+            std::cout << e.what() << std::endl;
+        }
+    });
+
+    gripper_state_thread_ = std::thread([this]() {
+        try {
+            std_msgs::msg::Float64 gripper_width_msg;
+            std_msgs::msg::Bool is_grasped_msg;
+
+            while (gripper_threads_running_.load()) {
+                franka::GripperState gripper_state;
+                {
+                    std::lock_guard<std::mutex> gripper_api_lock(mutex_gripper_api_);
+                    gripper_state = gripper_.readOnce();
+                }
+
+                cached_gripper_width_.store(gripper_state.width);
+                cached_is_grasped_.store(gripper_state.is_grasped);
+                gripper_width_msg.data = gripper_state.width;
+                is_grasped_msg.data = gripper_state.is_grasped;
+                gripper_width_publisher_->publish(gripper_width_msg);
+                is_grasped_publisher_->publish(is_grasped_msg);
+
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
             }
         } catch (const franka::Exception& e) {
             std::cout << e.what() << std::endl;
@@ -720,6 +744,13 @@ FrankaNode::FrankaNode(std::string node_name, std::string robot_IP) : Node(node_
 }
 
 FrankaNode::~FrankaNode() {
+    gripper_threads_running_ = false;
+
+    if (gripper_state_thread_.joinable()) {
+        std::cout << "Joining Gripper state thread" << std::endl;
+        gripper_state_thread_.join();
+    }
+
     if (control_thread_.joinable()) {
         std::cout << "Joining Control thread" << std::endl;
         control_thread_.join();
@@ -893,24 +924,23 @@ Eigen::MatrixXd FrankaNode::dampedLeastSquaresIK(Eigen::MatrixXd a, double dampi
     return InverseJacobian;
 }
 
-void FrankaNode::lambdaCommandCallback(const custom_msgs::msg::LambdaCommand::SharedPtr msg) { 
-        lambda_command_ = *msg;
-    if (mutex_vel_.try_lock()) {
-        // print original lambda_command_
-        // std::cout << "lambda_command_: " << lambda_command_.linear.x << " " << lambda_command_.linear.y << " " << lambda_command_.linear.z << " " << lambda_command_.angular.x << " " << lambda_command_.angular.y << " " << lambda_command_.angular.z << std::endl;
+void FrankaNode::lambdaCommandCallback(const custom_msgs::msg::LambdaCommand::SharedPtr msg) {
+    lambda_command_ = *msg;
+
+    {
+        std::lock_guard<std::mutex> vel_lock(mutex_vel_);
         v_x_ = clampValue(-lambda_command_.linear.y, -2.0, 2.0);
         v_y_ = clampValue(lambda_command_.linear.x, -2.0, 2.0);
         v_z_ = clampValue(lambda_command_.linear.z, -2.0, 2.0);
         w_x_ = clampValue(lambda_command_.angular.x, -2.0, 2.0);
         w_y_ = clampValue(lambda_command_.angular.y, -2.0, 2.0);
         w_z_ = clampValue(lambda_command_.angular.z, -2.0, 2.0);
-        if (mutex_grip_.try_lock()) {
-            v_gripper_ = lambda_command_.v_gripper;
-            close_gripper_ = lambda_command_.enable_backlash_compensation;
-            mutex_grip_.unlock();
-        }
         lambda_last_update_time_ = this->now().seconds();
+    }
 
-        mutex_vel_.unlock();
+    {
+        std::lock_guard<std::mutex> grip_lock(mutex_grip_);
+        v_gripper_ = lambda_command_.v_gripper;
+        close_gripper_ = lambda_command_.enable_backlash_compensation;
     }
-    }
+}
