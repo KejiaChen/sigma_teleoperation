@@ -163,11 +163,8 @@ FrankaNode::FrankaNode(std::string node_name, std::string robot_IP) : Node(node_
             bool last_close_gripper_flag = false;
             bool grasped_flag = false;
 
-            auto refresh_gripper_cache = [&]() {
-                const franka::GripperState gripper_state = gripper_.readOnce();
-                cached_gripper_width_.store(gripper_state.width);
-                cached_is_grasped_.store(gripper_state.is_grasped);
-                return gripper_state;
+            auto read_gripper_state = [&]() {
+                return gripper_.readOnce();
             };
 
             auto apply_gripper_command = [&](bool should_close) {
@@ -183,7 +180,6 @@ FrankaNode::FrankaNode(std::string node_name, std::string robot_IP) : Node(node_
                     grasped_flag = false;
                 }
 
-                refresh_gripper_cache();
             };
 
             {
@@ -196,7 +192,7 @@ FrankaNode::FrankaNode(std::string node_name, std::string robot_IP) : Node(node_
                 gripper_.stop();
                 gripper_.homing();
 
-                const franka::GripperState gripper_state = refresh_gripper_cache();
+                const franka::GripperState gripper_state = read_gripper_state();
                 gripper_max_width = gripper_state.max_width;
             }
 
@@ -225,31 +221,29 @@ FrankaNode::FrankaNode(std::string node_name, std::string robot_IP) : Node(node_
         }
     });
 
-    // gripper_state_thread_ = std::thread([this]() {
-    //     try {
-    //         std_msgs::msg::Float64 gripper_width_msg;
-    //         std_msgs::msg::Bool is_grasped_msg;
+    gripper_state_thread_ = std::thread([this]() {
+        std_msgs::msg::Float64 gripper_width_msg;
+        std_msgs::msg::Bool is_grasped_msg;
 
-    //         while (gripper_threads_running_.load()) {
-    //             franka::GripperState gripper_state;
-    //             {
-    //                 std::lock_guard<std::mutex> gripper_api_lock(mutex_gripper_api_);
-    //                 gripper_state = gripper_.readOnce();
-    //             }
+        while (gripper_threads_running_.load()) {
+            double commanded_gripper = 0.0;
+            bool close_gripper_flag = false;
+            {
+                std::lock_guard<std::mutex> grip_lock(mutex_grip_);
+                commanded_gripper = v_gripper_;
+                close_gripper_flag = close_gripper_;
+            }
 
-    //             cached_gripper_width_.store(gripper_state.width);
-    //             cached_is_grasped_.store(gripper_state.is_grasped);
-    //             gripper_width_msg.data = gripper_state.width;
-    //             is_grasped_msg.data = gripper_state.is_grasped;
-    //             gripper_width_publisher_->publish(gripper_width_msg);
-    //             is_grasped_publisher_->publish(is_grasped_msg);
+            cached_gripper_width_.store(commanded_gripper);
+            cached_is_grasped_.store(close_gripper_flag);
+            gripper_width_msg.data = commanded_gripper;
+            is_grasped_msg.data = close_gripper_flag;
+            gripper_width_publisher_->publish(gripper_width_msg);
+            is_grasped_publisher_->publish(is_grasped_msg);
 
-    //             std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    //         }
-    //     } catch (const franka::Exception& e) {
-    //         std::cout << e.what() << std::endl;
-    //     }
-    // });
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+    });
 
     control_thread_ = std::thread([this]() { 
         try {
